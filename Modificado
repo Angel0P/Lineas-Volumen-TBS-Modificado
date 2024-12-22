@@ -1,110 +1,133 @@
-//+---------------------------------------------------------------------+
-//|                    Líneas de Volumen TBS - Mejora v1.30             |
-//|                  Copyright 2024, Angel Parrilla                     |
-//+---------------------------------------------------------------------+
-#property copyright "Copyright 2024, Angel Parrilla."
-#property version   "1.30"                   // Incremento versión para seguimiento de cambios
-#property strict                             // Modo de compilación estricto para evitar errores
-#property indicator_chart_window             // Mostrar indicador en la ventana del gráfico
-#property indicator_buffers 4                // Número de buffers de datos del indicador
-#property indicator_plots   4                // Número de líneas a dibujar
+//+------------------------------------------------------------------+
+//|                     Líneas de Volumen TBS.mq4                    |
+//|                          Versión 1.33                            |
+//|                  Copyright 2024, Angel Parrilla                  |
+//+------------------------------------------------------------------+
+// Descripción: Este indicador calcula líneas de referencia basadas
+//              en el volumen ponderado, dando mayor peso a las
+//              barras más recientes. Permite configurar el período
+//              de ponderación, el horario de mercado y la fuente
+//              de tiempo.
 
-// Constantes de configuración para gestión de arrays dinámicos
-#ifndef EMPTY_VALUE
-    #define EMPTY_VALUE 0.0                  // Valor utilizado para indicar ausencia de dato
+#property copyright "Copyright 2024 Angel Parrilla" // Directiva #property para copyright (sin coma innecesaria)
+#property link      "[TuContacto]"           // Directiva #property para enlace
+#property version   "1.33"                   // Directiva #property para versión
+#property strict                             // Modo de compilación estricto
+#property indicator_chart_window             // Mostrar en la ventana del gráfico
+#property indicator_buffers 4                // Número de buffers
+#property indicator_plots   4                // Número de plots (líneas)
+
+//+------------------------------------------------------------------+
+// Variables globales (PERSISTENTES)                                 |
+//+------------------------------------------------------------------+
+datetime windowStartTime;
+long vol5MinBuffer[];
+long vol30MinBuffer[];
+datetime time5MinBuffer[];
+datetime time30MinBuffer[];
+int buffer5MinSize = 0;
+int buffer30MinSize = 0;
+datetime lastUpdateTime      = 0;            // Última actualización
+double lastValidVol5Min      = 0;            // Último volumen válido 5min
+double lastValidHalfVol5Min  = 0;            // Mitad del último volumen válido 5min
+double lastValidVol30Min     = 0;            // Último volumen válido 30min
+double lastValidHalfVol30Min = 0;            // Mitad del último volumen válido 30min
+bool isIndicatorInitialized = false;         // Inicialización del indicador
+int currentPeriod           = PERIOD_CURRENT;// Período actual
+const double GLOBAL_MAX_SAFE_VOLUME = 1000000000.0; // Variable global
+double globalLastValidVol5Min = 0;
+double globalLastValidHalfVol5Min = 0;
+double globalLastValidVol30Min = 0;
+double globalLastValidHalfVol30Min = 0;
+datetime globalNextUpdateTime = 0;
+datetime globalLastUpdateTime = 0; //Para evitar recalcular en el mismo minuto
+bool mensajeFueraHorarioMostrado = false;
+bool enableDebugPrints = false;  // Controla las impresiones de depuración
+
+//+------------------------------------------------------------------+
+//| Constantes y definiciones                                        |
+//+------------------------------------------------------------------+
+#ifndef EMPTY_VALUE                          // Evita redefiniciones
+#define EMPTY_VALUE 0.0                      // Valor para indicar ausencia de datos
+#endif
+#ifndef DOUBLE_MAX                           // Evita redefiniciones
+#define DOUBLE_MAX DBL_MAX                   // Valor máximo de double
 #endif
 
-#ifndef DOUBLE_MAX
-    #define DOUBLE_MAX DBL_MAX               // Valor máximo de tipo double para validaciones
-#endif
+// Macros de conversión segura
+#define SAFE_CONVERT_LONG_TO_DOUBLE(x) ((double)(x)) // Macro para conversión segura de long a double
+#define SAFE_CONVERT_DOUBLE_TO_INT(x)  ((int)MathRound(x)) // Macro para conversión segura de double a int
 
-// Macros de conversión segura entre tipos numéricos
-#define SAFE_CONVERT_LONG_TO_DOUBLE(x) ((double)(x))
-#define SAFE_CONVERT_DOUBLE_TO_INT(x) ((int)MathRound(x))
+// Configuración de arrays dinámicos
+#define INITIAL_ARRAY_SIZE   100             // Tamaño inicial de los arrays dinámicos
+#define ARRAY_RESIZE_STEP    50              // Incremento de tamaño de los arrays dinámicos
+#define MAX_HISTORICAL_LOOKBACK 500          // Máximo de barras históricas a considerar
 
-// Configuraciones base para gestión de arrays dinámicos
-#define INITIAL_ARRAY_SIZE 100               // Tamaño inicial de arrays para datos de volumen
-#define ARRAY_RESIZE_STEP 50                 // Incremento de tamaño cuando se necesita más espacio
-#define MAX_HISTORICAL_LOOKBACK 500          // Máximo de elementos históricos a considerar
-const long MAX_SAFE_VOLUME = 1000000000;     // Límite de volumen para prevenir desbordamientos
+const long MAX_SAFE_VOLUME = 1000000000;     // Límite de volumen (protección contra desbordamientos)
 
-// Enumera diferentes fuentes de tiempo para mayor flexibilidad
-enum TimeSourceType { 
-    TS_SERVER = 0,                           // Hora proporcionada por el servidor del broker
-    TS_LOCAL,                                // Hora del sistema local del usuario
-    TS_CHART                                 // Hora del gráfico actual
+//+------------------------------------------------------------------+
+//| Enumeraciones                                                    |
+//+------------------------------------------------------------------+
+// Fuentes de tiempo
+enum TimeSourceType {
+    TS_SERVER = 0,                           // Hora del servidor
+    TS_LOCAL,                                // Hora local
+    TS_CHART                                 // Hora del gráfico
 };
 
-// Enumera estilos de línea personalizables para mejorar visualización
+// Estilos de línea
 enum LineStyleType {
-    SOLID,                                   // ___ Línea sólida 
+    SOLID,                                   // ___ Línea sólida
     DASH,                                    // ------ Línea de guiones
     DOT,                                     // ······ Línea de puntos
     DASHDOT,                                 // -·-·-· Línea de guión y punto
     DASHDOTDOT                               // -··-·· Línea de guión, punto y punto
 };
 
-// Estructura para almacenar información detallada de volumen por barra
-struct VolumeData {
-    long volume;                             // Volumen de la barra
-    datetime barTime;                        // Marca de tiempo de la barra
-    int barHour;                             // Hora de la barra para filtrado rápido
-    bool isValid;                            // Indica si la barra es válida para cálculos
+//+------------------------------------------------------------------+
+//| Estructuras                                                      |
+//+------------------------------------------------------------------+
+struct VolumeData {                          // Estructura para almacenar datos de volumen por barra
+    long volume;                             // Volumen
+    datetime barTime;                        // Tiempo de la barra
+    int barHour;                             // Hora de la barra
+    bool isValid;                            // Validez de la barra
 };
 
-// Parámetros de entrada configurables por el usuario. Permiten personalizar el comportamiento del indicador sin modificar el código
-input int DaysBack = 3;                      // Número de días históricos para calcular volumen promedio
-input int MarketOpenHour = 8;                // Hora de inicio del horario de mercado
-input int MarketCloseHour = 22;              // Hora de cierre del horario de mercado
-input TimeSourceType TimeReference = TS_SERVER;// Selector de fuente de tiempo
-input color LineColor = clrYellow;           // Color de las líneas de referencia
-input int LineWidth = 1;                     // Grosor de las líneas ( mín.1 - máx.5 )
-input LineStyleType LineStyle = DASH;        // Estilo de las líneas
-input int PonderedHours = 16;                // Horas a ponderar
-input double DecayFactor = 0.95;             // Factor de decaimiento
+struct WeightedVolumeResult {                // Estructura para guardar el resultado del volumen ponderado
+    double weightedVolumeSum;
+    int barsCount;
+};
 
-// Declaraciones de funciones para prevenir advertencias del compilador
-datetime getCurrentTime();                   // Obtiene la hora actual según la fuente seleccionada
-string GetTimeSourceString();                // Obtiene descripción de la fuente de tiempo
-ENUM_LINE_STYLE ConvertLineStyle(LineStyleType style);// Convierte estilo de línea personalizado
-int calculateMaxHistoricalData();            // Convierte estilo de línea personalizado
-bool CheckBuffers();                         // Verifica la inicialización de buffers
-void UpdateChartText();                      // Actualiza texto en el gráfico
-void UpdateLabel(string name, string prefix, int yDistance, double value);// Actualiza etiquetas
-bool CreateLabel(string name, int yDistance);// Crea etiquetas en el gráfico
-int currentPeriod = PERIOD_CURRENT;  // Inicializar con el período actual por defecto
+//+------------------------------------------------------------------+
+//| Parámetros de entrada                                            |
+//+------------------------------------------------------------------+
+input int DaysBack        = 3;               // Días de la "ventana deslizante"
+input int MarketOpenHour  = 8;               // Hora de apertura del mercado
+input int MarketCloseHour = 22;              // Hora de cierre del mercado
+input TimeSourceType TimeReference = TS_SERVER; // Fuente de tiempo
+input color LineColor     = clrYellow;       // Color de las líneas
+input int LineWidth       = 1;               // Ancho de las líneas
+input LineStyleType LineStyle= DASH;         // Estilo de las líneas
+input int PonderedHours   = 16;              // Horas a ponderar
+input int InputBarsToLookBack = 1000;        //Número de barras a copiar
 
-// Buffers del indicador. Cada buffer representa una línea diferente en el gráfico
-double volRef5MinBuffer[];                   // Buffer para volumen de referencia 5min
-double volHalfRef5MinBuffer[];               // Buffer para medio volumen 5min
-double volRef30MinBuffer[];                  // Buffer para volumen de referencia 30min
-double volHalfRef30MinBuffer[];              // Buffer para medio volumen 30min
+//+------------------------------------------------------------------+
+//| Buffers del indicador                                            |
+//+------------------------------------------------------------------+
+double volRef5MinBuffer[];                   // Volumen de referencia 5min
+double volHalfRef5MinBuffer[];               // Medio volumen 5min
+double volRef30MinBuffer[];                  // Volumen de referencia 30min
+double volHalfRef30MinBuffer[];              // Medio volumen 30min
 
-// Control de estado del indicador
-double lastValidVol5Min = 0;                 // Último volumen válido para 5 minutos
-double lastValidHalfVol5Min = 0;             // Mitad del último volumen válido para 5 minutos
-double lastValidVol30Min = 0;                // Último volumen válido para 30 minutos
-double lastValidHalfVol30Min = 0;            // Mitad del último volumen válido para 30 minutos
-datetime lastUpdateTime = 0;                 // Última vez que se actualizó el indicador
-bool isIndicatorInitialized = false;         // Bandera para verificar inicialización completa
+//+------------------------------------------------------------------+
+// Funciones auxiliares (¡DEFINIDAS ANTES DE OnCalculate!)           |
+//+------------------------------------------------------------------+
+int TimeDiff(datetime time1, datetime time2) { // Calcula la diferencia en minutos entre dos tiempos
+    return (int)((time1 - time2) / 60);
+}
 
-// Configuración de visualización de líneas del indicador. Define cómo se representarán las líneas en el gráfico
-#property indicator_type1   DRAW_LINE        // Línea de volumen de referencia 5min
-#property indicator_type2   DRAW_LINE        // Línea de medio volumen 5min
-#property indicator_type3   DRAW_LINE        // Línea de volumen de referencia 30min
-#property indicator_type4   DRAW_LINE        // Línea de medio volumen 30min
-
-// Etiquetas para identificar cada línea del indicador. Mejoran la legibilidad en el gráfico
-#property indicator_label1  "Vol Ref 5min"
-#property indicator_label2  "Half Vol Ref 5min"
-#property indicator_label3  "Vol Ref 30min"
-#property indicator_label4  "Half Vol Ref 30min"
-
-//+---------------------------------------------------------------------+
-// Obtener hora actual según la fuente de tiempo seleccionada.          |
-// Permite flexibilidad en la referencia temporal                       |
-//+---------------------------------------------------------------------+
-datetime getCurrentTime() {
+datetime getCurrentTime() {                  // Obtiene la hora actual según la fuente de tiempo seleccionada
     switch(TimeReference) {
         case TS_SERVER: return TimeCurrent();// Hora del servidor de trading
         case TS_LOCAL:  return TimeLocal();  // Hora local del sistema
@@ -113,11 +136,7 @@ datetime getCurrentTime() {
     }
 }
 
-//+---------------------------------------------------------------------+
-// Función para obtener descripción textual de la fuente de tiempo.     |
-// Útil para imprimir logs y mensajes de depuración                     |
-//+---------------------------------------------------------------------+
-string GetTimeSourceString() {
+string GetTimeSourceString() {               // Obtiene la descripción textual de la fuente de tiempo
    switch(TimeReference)
    {
       case TS_SERVER: return "del servidor";
@@ -127,15 +146,234 @@ string GetTimeSourceString() {
    }
 }
 
-//+---------------------------------------------------------------------+
-// Función para convertir LineStyleType a estilo nativo de MetaTrader   |
-// con mapeo directo                                                    |
-//+---------------------------------------------------------------------+
-ENUM_LINE_STYLE ConvertLineStyle(LineStyleType style) {
+ENUM_LINE_STYLE ConvertLineStyle(LineStyleType style) { // Convierte LineStyleType a ENUM_LINE_STYLE
    static const ENUM_LINE_STYLE styleMap[] = {
       STYLE_SOLID, STYLE_DASH, STYLE_DOT, STYLE_DASHDOT, STYLE_DASHDOTDOT
    };
    return styleMap[style];
+}
+
+// Calcula el volumen ponderado dentro de un período de tiempo dado.
+// MODIFICACIÓN IMPORTANTE: Se ha adaptado para usar la "ventana deslizante"
+// y el peso base según las especificaciones.
+WeightedVolumeResult calculateWeightedVolume(const datetime &time[], const long &volume[], int rates_total, datetime currentTime, int ponderedMinutes) {
+    double weightedVolumeSum = 0;
+    int barsCount = 0;
+    datetime startTime = GetTradingStartTime(currentTime, DaysBack); // Inicio de la ventana deslizante
+
+    for (int i = rates_total - 1; i >= 0; i--) {
+        if (Time[i] >= startTime) { // Solo considerar barras dentro de la ventana
+            double weight = 1.0;
+            int minutesDiff = TimeDiff(currentTime, Time[i]);
+
+            if (minutesDiff <= ponderedMinutes) {
+                weight = 1.0 + (ponderedMinutes - minutesDiff) / (double)ponderedMinutes;
+            }
+
+            if (volume[i] > 0) { // Excluir barras con volumen 0
+                weightedVolumeSum += (double)volume[i] * weight;
+                barsCount++;
+            }
+        }
+    }
+
+    WeightedVolumeResult result;
+    result.weightedVolumeSum = (barsCount > 0) ? weightedVolumeSum / barsCount : 0.0; // Promedio solo si hay barras
+    result.barsCount = barsCount;
+    return result;
+}
+
+datetime GetTradingStartTime(datetime currentTime, int days) { // Obtiene el inicio del período de trading de 'days' días atrás
+    datetime startTime = currentTime;
+    int countedDays = 0;
+    while (countedDays < days) {
+        startTime -= PeriodSeconds(PERIOD_D1);
+        if (IsTradingDay(startTime)) {
+            countedDays++;
+        }
+    }
+    return startTime;
+}
+
+bool IsTradingDay(datetime time) { // Determina si un día es día de trading (excluye fines de semana)
+    int dayOfWeek = TimeDayOfWeek(time);
+    if (dayOfWeek == 0 || dayOfWeek == 6) return false; 
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Propiedades del indicador (para MetaTrader)                      |
+//+------------------------------------------------------------------+
+#property indicator_type1   DRAW_LINE        // Tipo de línea 1
+#property indicator_type2   DRAW_LINE        // Tipo de línea 2
+#property indicator_type3   DRAW_LINE        // Tipo de línea 3
+#property indicator_type4   DRAW_LINE        // Tipo de línea 4
+
+#property indicator_label1  "Vol Ref 5min"   // Etiqueta línea 1
+#property indicator_label2  "Half Vol Ref 5min"// Etiqueta línea 2
+#property indicator_label3  "Vol Ref 30min"  // Etiqueta línea 3
+#property indicator_label4  "Half Vol Ref 30min"// Etiqueta línea 4
+
+// Función auxiliar para imprimir solo cuando sea necesario
+void DebugPrint(string message) {
+    if(enableDebugPrints) {
+        Print(message);
+    }
+}
+
+//+---------------------------------------------------------------------+
+// Nueva función para calcular el tamaño máximo de datos históricos     |
+//+---------------------------------------------------------------------+
+int calculateMaxHistoricalData() { // Calcula el tamaño máximo de datos históricos a cargar
+    // Calcular horas de mercado
+    int marketHours = MarketCloseHour - MarketOpenHour;
+    // Si el rango de horas es inusual, ajustar
+    if (marketHours <= 0) {
+        marketHours = 14;                    // Por defecto 14 horas
+        Print("WARNING: Rango de horas de mercado inválido. Usando valor predeterminado.");
+    }
+    // Base: 15 barras por cada hora de mercado. Más realista para timeframe de 5 minutos
+    int maxData = marketHours * 15;
+    // Límites de seguridad
+    if (maxData < 100) maxData = 100;        // Mínimo 100 barras
+    if (maxData > 1000) maxData = 1000;      // Máximo 1000 barras
+    Print("Rango de horas de mercado: ", marketHours, " horas. Datos históricos máximos calculados: ", maxData);
+
+    return maxData;
+}
+
+//+---------------------------------------------------------------------+
+// Función para recalcular si cambian las horas de mercado              |
+//+---------------------------------------------------------------------+
+void recalculateVolumeWindows() { // Recalcula las ventanas de volumen
+    // Reiniciar ventanas con nuevo tamaño de datos históricos máximos
+    volumeWindow5Min = DynamicVolumeWindow();
+    volumeWindow30Min = DynamicVolumeWindow();
+}
+
+//+---------------------------------------------------------------------+
+// Calcular volumen de referencia para un período específico            |
+// Método principal para calcular promedios históricos de volumen       |
+//+---------------------------------------------------------------------+
+double calculateReferenceVolume(int timeframe, int horasPonderadas = 8, double factorDecay = 2.0) {
+    datetime currentTime = getCurrentTime();
+    int totalBars = InputBarsToLookBack;  // Usar el input definido por el usuario
+    double totalVolume = 0;
+    int validBars = 0;
+    
+    // Array para almacenar los volúmenes temporalmente
+    MqlRates rates[];
+    ArraySetAsSeries(rates, true);
+    
+    // Obtener los datos históricos
+    int copied = CopyRates(Symbol(), timeframe, 0, totalBars, rates);
+    if(copied <= 0) {
+        Print("Error al copiar datos históricos: ", GetLastError());
+        return 0;
+    }
+    
+    // Calcular las horas del mercado en minutos
+    int marketOpenMinutes = MarketOpenHour * 60;
+    int marketCloseMinutes = MarketCloseHour * 60;
+    
+    // Recorrer las barras y calcular el volumen ponderado
+    for(int i = 0; i < copied; i++) {
+        datetime barTime = rates[i].time;
+        int barHour = TimeHour(barTime);
+        int barMinute = TimeMinute(barTime);
+        int totalBarMinutes = barHour * 60 + barMinute;
+        
+        // Verificar si la barra está dentro del horario de mercado
+        if(totalBarMinutes >= marketOpenMinutes && totalBarMinutes < marketCloseMinutes) {
+            // Calcular el peso basado en la antigüedad de la barra
+            int minutesOld = (int)((currentTime - barTime) / 60);
+            double weight = 1.0;
+            
+            // Aplicar ponderación si está dentro del período de ponderación
+            if(minutesOld <= (horasPonderadas * 60)) {
+                weight = 1.0 + ((horasPonderadas * 60 - minutesOld) / (double)(horasPonderadas * 60));
+                // Aplicar factor de decaimiento si se especifica
+                if(factorDecay != 2.0) {
+                    weight *= MathPow(factorDecay, (double)minutesOld / (60 * horasPonderadas));
+                }
+            }
+            
+            // Sumar el volumen ponderado
+            totalVolume += rates[i].tick_volume * weight;
+            validBars++;
+            
+            // Debug de los primeros 5 cálculos
+            if(i < 5) {
+                Print("Barra ", i, ": Tiempo=", TimeToString(barTime), 
+                      ", Volumen=", rates[i].tick_volume,
+                      ", Peso=", weight,
+                      ", Volumen Ponderado=", rates[i].tick_volume * weight);
+            }
+        }
+    }
+    
+    // Calcular y retornar el promedio
+    if(validBars > 0) {
+        double result = totalVolume / validBars;
+        Print("Timeframe ", timeframe, ": Volumen Total=", totalVolume,
+              ", Barras Válidas=", validBars,
+              ", Promedio=", result);
+        return result;
+    }
+    
+    return 0;
+}
+
+//+---------------------------------------------------------------------+
+// Funciones específicas para cálculo de volumen de referencia          |
+// Simplifican llamadas para períodos de 5 y 30 minutos                 |
+//+---------------------------------------------------------------------+
+double calculateReference5MinVolume() {
+    datetime currentTime = getCurrentTime();
+
+    // Cambiar el timeframe a 5 minutos
+    int ponderedMinutes = PonderedHours * 60;
+    datetime timeArray[];
+    long volumeArray[];
+    int barsCount = iBars(NULL, PERIOD_M5);
+
+    // Redimensionar arrays
+    ArrayResize(timeArray, barsCount);
+    ArrayResize(volumeArray, barsCount);
+
+    // Copiar datos a los arrays
+    for(int i = 0; i < barsCount; i++) {
+        timeArray[i] = iTime(NULL, PERIOD_M5, i);
+        volumeArray[i] = (int)iVolume(NULL, PERIOD_M5, i); // Conversión a tipo double
+    }
+
+    WeightedVolumeResult result = calculateWeightedVolume(timeArray, volumeArray, barsCount, currentTime, ponderedMinutes);
+
+    return result.weightedVolumeSum;
+}
+
+double calculateReference30MinVolume() {
+    datetime currentTime = getCurrentTime();
+
+    // Cambiar el timeframe a 30 minutos
+    int ponderedMinutes = PonderedHours * 60;
+    datetime timeArray[];
+    long volumeArray[];
+    int barsCount = iBars(NULL, PERIOD_M30);
+
+    // Redimensionar arrays
+    ArrayResize(timeArray, barsCount);
+    ArrayResize(volumeArray, barsCount);
+
+    // Copiar datos a los arrays
+    for(int i = 0; i < barsCount; i++) {
+        timeArray[i] = iTime(NULL, PERIOD_M30, i);
+        volumeArray[i] = (int)iVolume(NULL, PERIOD_M30, i); // Conversión a tipo double
+    }
+
+    WeightedVolumeResult result = calculateWeightedVolume(timeArray, volumeArray, barsCount, currentTime, ponderedMinutes);
+
+    return result.weightedVolumeSum;
 }
 
 //+---------------------------------------------------------------------+
@@ -145,21 +383,18 @@ ENUM_LINE_STYLE ConvertLineStyle(LineStyleType style) {
 // - Prevención de desbordamientos                                      |
 //+---------------------------------------------------------------------+
 double convertirVolumenSeguro(long volumen) {
-    // Rango seguro para conversión
-    const long MAX_SAFE_CONVERSION_VOLUME = 1000000000; // 1 billón
-    
     // Verificaciones de rango para prevenir errores de datos anómalos
     if (volumen < 0) {
         Print("WARNING: Volumen negativo detectado. Corrigiendo a 0.");
         return 0.0;
     }
     
-    if (volumen > MAX_SAFE_VOLUME) {
+    if (volumen > GLOBAL_MAX_SAFE_VOLUME) {  // Usar la constante global
         Print("WARNING: Volumen excede límite seguro. Truncando.");
-        return (double)MAX_SAFE_VOLUME;
+        return GLOBAL_MAX_SAFE_VOLUME;
     }
     
-    return (double)volumen;
+    return (double)volumen;                  // Conversión explícita a double
 }
 
 //+---------------------------------------------------------------------+
@@ -173,22 +408,18 @@ double calculateArrayAverage(double &arr[], int size) {
         Print("WARNING: Intento de calcular promedio de array vacío");
         return 0.0;
     }
-
     // Usar long double para máxima precisión
     double sumaTotal = 0.0;
     int elementosValidos = 0;
 
     // Iterar con verificaciones de seguridad
     for (int i = 0; i < size; i++) {
-        if (MathIsValidNumber(arr[i]) &&     // Ignorar valores no numéricos o extremos
-
-            arr[i] != EMPTY_VALUE && 
-            arr[i] != DOUBLE_MAX) {
+        // Ignorar valores no numéricos o extremos
+        if (MathIsValidNumber(arr[i]) && arr[i] != EMPTY_VALUE && arr[i] != DOUBLE_MAX) {
             sumaTotal += (int)arr[i];
             elementosValidos++;
         }
     }
-
     // Prevenir división por cero
     if (elementosValidos == 0) {
         Print("WARNING: Ningún elemento válido para promediar");
@@ -209,7 +440,6 @@ private:
     int currentSize;                         // Tamaño actual de datos válidos
 
 public:
-    // Constructor actualizado
     DynamicVolumeWindow() {
         // Calcular dinámicamente el tamaño máximo
         maxHistoricalData = calculateMaxHistoricalData();
@@ -219,11 +449,9 @@ public:
             volumeData[i].isValid = false;
         }
     }
-
     // Añadir nueva barra con validación
     bool addBarData(long volume, datetime barTime) {
         int barHour = TimeHour(barTime);
-
         // Validar horario de mercado
         if (barHour < MarketOpenHour || barHour >= MarketCloseHour) 
             return false;
@@ -278,7 +506,7 @@ public:
 
         for (int i = 0; i < maxHistoricalData; i++) {
             if (volumeData[i].isValid) {
-                totalVolume += (int) volumeData[i].volume;
+                totalVolume += (int)volumeData[i].volume;
                 validCount++;
             }
         }
@@ -291,153 +519,197 @@ public:
         Print("Estado de la ventana de volumen:");
         Print("Tamaño actual: ", currentSize);
         Print("Barras válidas:");
-        
+
         for (int i = 0; i < maxHistoricalData; i++) {
             if (volumeData[i].isValid) {
-                Print(" - Hora: ", volumeData[i].barTime, 
-                      ", Volumen: ", volumeData[i].volume);
+                Print(" - Hora: ", volumeData[i].barTime, ", Volumen: ", volumeData[i].volume);
             }
         }
     }
 };
 
-// Instancias globales para diferentes periodos
+// Instancias globales para diferentes periodos (¡DESPUÉS DE LA DEFINICIÓN DE LA CLASE!)
 DynamicVolumeWindow volumeWindow5Min;
 DynamicVolumeWindow volumeWindow30Min;
 
 //+---------------------------------------------------------------------+
-// Nueva función para calcular el tamaño máximo de datos históricos     |
-//+---------------------------------------------------------------------+
-int calculateMaxHistoricalData() {
-    // Calcular horas de mercado
-    int marketHours = MarketCloseHour - MarketOpenHour;
-    
-    // Si el rango de horas es inusual, ajustar
-    if (marketHours <= 0) {
-        marketHours = 14;                    // Por defecto 14 horas
-        Print("WARNING: Rango de horas de mercado inválido. Usando valor predeterminado.");
-    }
-
-    // Base: 15 barras por cada hora de mercado. Más realista para timeframe de 5 minutos
-    int maxData = marketHours * 15;  
-
-    // Límites de seguridad
-    if (maxData < 100) maxData = 100;        // Mínimo 100 barras
-    if (maxData > 1000) maxData = 1000;      // Máximo 1000 barras
-
-    Print("Rango de horas de mercado: ", marketHours, 
-          " horas. Datos históricos máximos calculados: ", maxData);
-
-    return maxData;
-}
-
-//+---------------------------------------------------------------------+
-// Función para recalcular si cambian las horas de mercado              |
-//+---------------------------------------------------------------------+
-void recalculateVolumeWindows() {
-    // Reiniciar ventanas con nuevo tamaño de datos históricos máximos
-    volumeWindow5Min = DynamicVolumeWindow();
-    volumeWindow30Min = DynamicVolumeWindow();
-}
-
-//+---------------------------------------------------------------------+
-// Calcular volumen de referencia para un período específico            |
-// Método principal para calcular promedios históricos de volumen       |
-//+---------------------------------------------------------------------+
-double calculateReferenceVolume(int period, int horasPonderadas = 8, double factorDecay = 2.0) {
-    datetime tiempoActual = getCurrentTime();
-    
-    double totalVolumenPonderado = 0.0;
-    double sumaPesos = 0.0;
-    datetime primeraBarraPonderada = 0;
-    
-    // Iterar sobre barras históricas
-    for (int i = 0; i < iBars(NULL, period); i++) {
-        datetime tiempoBarra = iTime(NULL, period, i);
-        long volumenTicket = iVolume(NULL, period, i);
-        
-        // Filtros de validación temporal
-        bool esTiempoValido = tiempoBarra < tiempoActual;
-        bool esVolumenValido = volumenTicket > 0;
-        
-        if (esTiempoValido && esVolumenValido) {
-            // Calcular horas desde la barra actual
-            int horasDesdeBarra = (int)((tiempoActual - tiempoBarra) / 3600);
-            
-            // Limitar al rango de horas ponderadas
-            if (horasDesdeBarra < horasPonderadas) {
-                // Peso decreciente: cuanto más reciente, más peso
-                double peso = MathPow(factorDecay, horasPonderadas - horasDesdeBarra - 1);
-                
-                // Conversión segura de volumen
-                double volumenConvertido = convertirVolumenSeguro(volumenTicket);
-                
-                totalVolumenPonderado += volumenConvertido * peso;
-                sumaPesos += peso;
-                
-                // Registrar la primera barra ponderada (la más reciente)
-                if (primeraBarraPonderada == 0 || tiempoBarra > primeraBarraPonderada) {
-                    primeraBarraPonderada = tiempoBarra;
-                }
-            }
-        }
-    }
-    
-    // Imprimir información de la primera barra ponderada
-    if (primeraBarraPonderada != 0) {
-        Print("Período: ", period, " minutos - Primera barra ponderada: ", 
-              TimeToString(primeraBarraPonderada, TIME_DATE | TIME_MINUTES),
-              " (", TimeDayOfWeek(primeraBarraPonderada), ")");
-    }
-    
-    // Cálculo final con manejo de división por cero
-    return (sumaPesos > 0) 
-           ? NormalizeDouble(totalVolumenPonderado / sumaPesos, 2) 
-           : 0.0;
-}
-
-//+---------------------------------------------------------------------+
-// Funciones específicas para cálculo de volumen de referencia          |
-// Simplifican llamadas para períodos de 5 y 30 minutos                 |
-//+---------------------------------------------------------------------+
-double calculateReference5MinVolume() { 
-    return calculateReferenceVolume(PERIOD_M5, PonderedHours, DecayFactor); 
-}
-
-double calculateReference30MinVolume() { 
-    return calculateReferenceVolume(PERIOD_M30, PonderedHours, DecayFactor); 
-}
-
-//+---------------------------------------------------------------------+
 // Inicialización del indicador                                         |
-// Configura buffers, estilos de línea y prepara el indicador           |
 //+---------------------------------------------------------------------+
 int OnInit() {
-    if (isIndicatorInitialized) return INIT_SUCCEEDED;
+    // Asignar los buffers correctamente
+    SetIndexBuffer(0, volRef5MinBuffer);
+    SetIndexBuffer(1, volHalfRef5MinBuffer);
+    SetIndexBuffer(2, volRef30MinBuffer);
+    SetIndexBuffer(3, volHalfRef30MinBuffer);
 
-    Print("Inicialización del indicador de volumen de referencia...");
+    // Establecer nombres correctos para cada línea
+    SetIndexLabel(0, "Volumen 5min");
+    SetIndexLabel(1, "Mitad Vol 5min");
+    SetIndexLabel(2, "Volumen 30min");
+    SetIndexLabel(3, "Mitad Vol 30min");
 
-    // Configuración más compacta de buffers
-    SetIndexBuffer(0, volRef5MinBuffer, INDICATOR_DATA);
-    SetIndexBuffer(1, volHalfRef5MinBuffer, INDICATOR_DATA);
-    SetIndexBuffer(2, volRef30MinBuffer, INDICATOR_DATA);
-    SetIndexBuffer(3, volHalfRef30MinBuffer, INDICATOR_DATA);
-
-    // Configuración unificada de estilos
-    int lineStyle = ConvertLineStyle(LineStyle);
-    for (int i = 0; i < 4; i++) {
-        SetIndexStyle(i, DRAW_LINE, lineStyle, LineWidth, LineColor);
+    // Configurar el estilo de las líneas
+    for(int i = 0; i < 4; i++) {
+        SetIndexStyle(i, DRAW_LINE, ConvertLineStyle(LineStyle), LineWidth, LineColor);
         SetIndexDrawBegin(i, 0);
-        SetIndexEmptyValue(i, EMPTY_VALUE);
+        SetIndexShift(i, 0);
+        SetIndexEmptyValue(i, EMPTY_VALUE); // Importante: establecer valor vacío
     }
 
-    isIndicatorInitialized = true;
+    // Inicializar los buffers con EMPTY_VALUE
+    ArrayInitialize(volRef5MinBuffer, EMPTY_VALUE);
+    ArrayInitialize(volHalfRef5MinBuffer, EMPTY_VALUE);
+    ArrayInitialize(volRef30MinBuffer, EMPTY_VALUE);
+    ArrayInitialize(volHalfRef30MinBuffer, EMPTY_VALUE);
+
+    // Inicialización de variables globales
+    isIndicatorInitialized = false;
     lastUpdateTime = 0;
+    lastValidVol5Min = 0;
+    lastValidHalfVol5Min = 0;
+    lastValidVol30Min = 0;
+    lastValidHalfVol30Min = 0;
 
-    // Calcular tamaño inicial de ventanas
-    recalculateVolumeWindows();
+    // Resetear la variable de control
+    mensajeFueraHorarioMostrado = false;
 
-    return INIT_SUCCEEDED;
+    return(INIT_SUCCEEDED);
+}
+
+//+---------------------------------------------------------------------+
+// Calcula la próxima hora de actualización                              |
+//+---------------------------------------------------------------------+
+datetime calculateNextUpdateTime(datetime currentTime) {
+    int currentHour = TimeHour(currentTime);
+    datetime tempTime = currentTime;
+
+    // Calcular la próxima hora de actualización (10, 14, 18 o 22)
+    if (currentHour >= 22) {
+        // Si es después de las 22:00, la próxima actualización será mañana a las 10:00
+        tempTime += (24 - currentHour + 10) * 3600;
+    } else if (currentHour >= 18) {
+        // Si es después de las 18:00, próxima actualización a las 22:00
+        tempTime += (22 - currentHour) * 3600;
+    } else if (currentHour >= 14) {
+        // Si es después de las 14:00, próxima actualización a las 18:00
+        tempTime += (18 - currentHour) * 3600;
+    } else if (currentHour >= 10) {
+        // Si es después de las 10:00, próxima actualización a las 14:00
+        tempTime += (14 - currentHour) * 3600;
+    } else {
+        // Si es antes de las 10:00, próxima actualización a las 10:00
+        tempTime += (10 - currentHour) * 3600;
+    }
+
+    // Ajustar a la hora exacta (eliminar minutos y segundos)
+    return tempTime - TimeMinute(tempTime) * 60 - TimeSeconds(tempTime);
+}
+
+//+---------------------------------------------------------------------+
+// Función principal de cálculo del indicador                         |
+//+---------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[]) {
+
+    datetime currentTime = getCurrentTime();
+    int currentHour = TimeHour(currentTime);
+
+    // Verificar horario de mercado. Si está fuera del horario, limpiar los buffers
+    if (currentHour < MarketOpenHour || currentHour >= MarketCloseHour) {
+        if (!mensajeFueraHorarioMostrado) {
+            Print("Fuera de horario de mercado: ", currentHour);
+            mensajeFueraHorarioMostrado = true;
+        }
+        return rates_total; // Salir sin calcular nada
+    }
+    mensajeFueraHorarioMostrado = false;
+
+    // Condición de actualización:
+    // 1. Minuto 1 de las horas de actualización (10, 14, 18, 22).
+    // 2. Primera inicialización del indicador.
+    bool necesitaActualizar = (TimeMinute(currentTime) == 1 &&
+                               (currentHour == 10 ||
+                                currentHour == 14 ||
+                                currentHour == 18 ||
+                                currentHour == 22)) ||
+                               !isIndicatorInitialized;
+
+    if (necesitaActualizar) {
+        Print("-------- Iniciando Cálculo de Volúmenes --------");
+
+        // Calcular nuevos valores de volumen ponderado
+        double nuevoVol5Min = calculateReference5MinVolume();
+        double nuevoVol30Min = calculateReference30MinVolume();
+
+        // Verificar y actualizar valores de 5 minutos
+        if (nuevoVol5Min > 0 && nuevoVol5Min <= MAX_SAFE_VOLUME) {
+            lastValidVol5Min = nuevoVol5Min;
+            lastValidHalfVol5Min = nuevoVol5Min / 2.0;
+            Print("5 minutos actualizado: ", DoubleToString(lastValidVol5Min, 2),
+                  " (mitad: ", DoubleToString(lastValidHalfVol5Min, 2), ")");
+        } else {
+            Print("Valor 5 minutos inválido: ", nuevoVol5Min);
+        }
+        // Verificar y actualizar valores de 30 minutos
+        if (nuevoVol30Min > 0 && nuevoVol30Min <= MAX_SAFE_VOLUME) {
+            lastValidVol30Min = nuevoVol30Min;
+            lastValidHalfVol30Min = nuevoVol30Min / 2.0;
+            Print("30 minutos actualizado: ", DoubleToString(lastValidVol30Min, 2),
+                  " (mitad: ", DoubleToString(lastValidHalfVol30Min, 2), ")");
+        } else {
+            Print("Valor 30 minutos inválido: ", nuevoVol30Min);
+        }
+
+        // Actualizar valores globales (importante para la visualización)
+        globalLastValidVol5Min = lastValidVol5Min;
+        globalLastValidHalfVol5Min = lastValidHalfVol5Min;
+        globalLastValidVol30Min = lastValidVol30Min;
+        globalLastValidHalfVol30Min = lastValidHalfVol30Min;
+        globalLastUpdateTime = currentTime;
+        isIndicatorInitialized = true; // Marcar como inicializado después del primer cálculo
+
+        // Calcular próxima actualización
+        datetime nextUpdate = calculateNextUpdateTime(currentTime);
+        string timeInfo = TimeToString(nextUpdate, TIME_MINUTES);
+        string dateInfo = StringFormat("%02d·%02d·%d",
+                                       TimeDay(nextUpdate),
+                                       TimeMonth(nextUpdate),
+                                       TimeYear(nextUpdate));
+
+        Print("------------------------------------------------------------------------------");
+        Print("Próxima actualización a las ", timeInfo, " del ", dateInfo, " según la hora '", GetTimeSourceString(), "'.");
+        Print("------------------------------------------------------------------------------");
+    }
+
+    // Visualización CONDICIONAL según el timeframe (CAMBIO CLAVE)
+    int limit = rates_total - prev_calculated;
+    for (int i = 0; i < limit; i++) {
+        int idx = rates_total - 1 - i;
+        if (Period() == PERIOD_M5) {
+            volRef5MinBuffer[idx] = lastValidVol5Min;
+            volHalfRef5MinBuffer[idx] = lastValidHalfVol5Min;
+        } else if (Period() == PERIOD_M30) {
+            volRef30MinBuffer[idx] = lastValidVol30Min;
+            volHalfRef30MinBuffer[idx] = lastValidHalfVol30Min;
+        } else {
+            volRef5MinBuffer[idx] = EMPTY_VALUE;
+            volHalfRef5MinBuffer[idx] = EMPTY_VALUE;
+            volRef30MinBuffer[idx] = EMPTY_VALUE;
+            volHalfRef30MinBuffer[idx] = EMPTY_VALUE;
+        }
+    }
+
+    UpdateChartText();
+    updateChartElements(globalLastValidVol5Min, globalLastValidVol30Min);
+    return rates_total;
 }
 
 //+---------------------------------------------------------------------+
@@ -445,159 +717,106 @@ int OnInit() {
 // Limpia recursos y elimina objetos creados                            |
 //+---------------------------------------------------------------------+
 void OnDeinit(const int reason) {
-    Print("Desinicialización del indicador de volumen de referencia...");
-    // Eliminar específicamente las etiquetas de volumen de referencia
+    // Obtener la razón de la desinicialización para el mensaje de log
+    Print("Indicador de Volumen Ponderado desinicializado. Razón: ", GetDeinitReasonString(reason));
+
+    // Eliminar las etiquetas de volumen de referencia (IMPORTANTE)
     string labelNames[] = {"VolumenRefText", "MitadVolumenRefText", "VolumenRef30MinText", "MitadVolumenRef30MinText"};
-    for(int i = 0; i < ArraySize(labelNames); i++) {
+    for (int i = 0; i < ArraySize(labelNames); i++) {
         ObjectDelete(0, labelNames[i]);
     }
-    ObjectsDeleteAll(0, "VolRef");           // Eliminar todos los objetos creados con prefijo "VolRef"
+
+    // Eliminar todos los objetos creados con el prefijo "VolRef" (IMPORTANTE)
+    ObjectsDeleteAll(0, "VolRef");
+
+    // Liberar arrays dinámicos (Si se usan)
+    ArrayFree(volRef5MinBuffer);
+    ArrayFree(volHalfRef5MinBuffer);
+    ArrayFree(volRef30MinBuffer);
+    ArrayFree(volHalfRef30MinBuffer);
+
+    // Reiniciar variables globales (OPCIONAL pero recomendable para evitar comportamientos extraños)
     isIndicatorInitialized = false;
     lastUpdateTime = 0;
+    lastValidVol5Min = 0;
+    lastValidHalfVol5Min = 0;
+    lastValidVol30Min = 0;
+    lastValidHalfVol30Min = 0;
+
+    Print("Razón de desinicialización: ", GetDeinitReasonString(reason));
 }
 
-//+---------------------------------------------------------------------+
-// Función principal de cálculo del indicador                           |
-// Punto de entrada para actualizar y procesar datos del indicador      |
-//+---------------------------------------------------------------------+
-int OnCalculate(const int rates_total, const int prev_calculated, const datetime &time[],
-                const double &open[], const double &high[], const double &low[], 
-                const double &close[], const long &tick_volume[], 
-                const long &volume[], const int &spread[]) {
-    
-    // Verificar si el timeframe ha cambiado
-    if (Period() != currentPeriod) {
-        currentPeriod = Period();
-        recalculateVolumeWindows();
-        return rates_total;
+string GetDeinitReasonString(int reason) {
+    string reason_string;
+    switch (reason) {
+        case REASON_CHARTCHANGE: reason_string = "Cambio de gráfico"; break;
+        case REASON_CHARTCLOSE:  reason_string = "Cierre de gráfico"; break;
+        case REASON_INITFAILED:  reason_string = "Fallo de inicialización"; break;
+        case REASON_PARAMETERS:  reason_string = "Cambio de parámetros"; break;
+        case REASON_PROGRAM:   reason_string = "Cierre del programa"; break;
+        case REASON_TEMPLATE:    reason_string = "Aplicación de plantilla"; break;
+        case REASON_RECOMPILE:   reason_string = "Recompilación"; break;
+        default:                reason_string = "Razón desconocida (" + IntegerToString(reason) + ")";
     }
-    
-    // Verificar inicialización
-    if (!isIndicatorInitialized)
-        return rates_total;
-    
-    datetime currentTime = getCurrentTime();
-    int currentHour = TimeHour(currentTime);
-    int currentMinute = TimeMinute(currentTime);
-    
-    // Condición de actualización programada
-    bool needsUpdate = (lastUpdateTime == 0) || // Primera inicialización
-                       ((currentHour == 10 || currentHour == 14 || 
-                         currentHour == 18 || currentHour == 22) && 
-                        currentMinute == 0);
-    
-    if (needsUpdate) {
-        // Procesar solo las nuevas barras en momentos programados
-        for (int i = prev_calculated; i < rates_total; i++) {
-            datetime barTime = time[i];
-            long barVolume = volume[i];
-            
-            // Añadir barra a la ventana de volumen según el período actual
-            if (Period() == PERIOD_M5) {
-                volumeWindow5Min.addBarData(barVolume, barTime);
-            } else if (Period() == PERIOD_M30) {
-                volumeWindow30Min.addBarData(barVolume, barTime);
-            }
-        }
-        
-        // Calcular volúmenes de referencia 
-        double volRef5Min = calculateReference5MinVolume();
-        double volRef30Min = calculateReference30MinVolume();
-        
-        // Rellenar buffers con volumen de referencia
-        for (int i = 0; i < rates_total; i++) {
-            volRef5MinBuffer[i] = lastValidVol5Min;
-            volHalfRef5MinBuffer[i] = lastValidHalfVol5Min;
-            volRef30MinBuffer[i] = lastValidVol30Min;
-            volHalfRef30MinBuffer[i] = lastValidHalfVol30Min;
-        }
-        
-        // Actualizar los últimos valores válidos
-        lastValidVol5Min = volRef5Min;
-        lastValidHalfVol5Min = volRef5Min / 2.0;
-        lastValidVol30Min = volRef30Min;
-        lastValidHalfVol30Min = volRef30Min / 2.0;
-
-        // Actualizar elementos gráficos
-        updateChartElements(lastValidVol5Min, lastValidVol30Min);
-        UpdateChartText();
-
-        // Actualizar tiempo de última actualización
-        lastUpdateTime = currentTime;
-
-        // Resto del código de programación de próxima actualización permanece igual
-        datetime nextUpdate = currentTime;
-        if (currentHour < 10) 
-            nextUpdate = StringToTime(TimeToString(currentTime, TIME_DATE) + " 10:00");
-        else if (currentHour < 14) 
-            nextUpdate = StringToTime(TimeToString(currentTime, TIME_DATE) + " 14:00");
-        else if (currentHour < 18) 
-            nextUpdate = StringToTime(TimeToString(currentTime, TIME_DATE) + " 18:00");
-        else if (currentHour < 22) 
-            nextUpdate = StringToTime(TimeToString(currentTime, TIME_DATE) + " 22:00");
-        else {
-            // Si es después de las 22:00, programar para el día siguiente
-            datetime nextDay = currentTime + PeriodSeconds(PERIOD_D1);
-            nextUpdate = StringToTime(TimeToString(nextDay, TIME_DATE) + " 10:00");
-        }
-        
-        // Formatear información de la próxima actualización para el log
-        string hora = TimeToString(nextUpdate, TIME_MINUTES);
-        string dia = IntegerToString(TimeDay(nextUpdate), 2, '0');
-        string mes = IntegerToString(TimeMonth(nextUpdate), 2, '0');
-        string anio = IntegerToString(TimeYear(nextUpdate));
-        string timeSource = GetTimeSourceString();
-
-        Print("--------------------------------------------------------------------------------------------------------------------");
-        Print("Próxima actualización de líneas de volumen programada a las ", 
-              hora, " del ", 
-              dia, "·",
-              mes, "·",
-              anio, " según la hora '", timeSource, "'.");
-        Print("--------------------------------------------------------------------------------------------------------------------");
-    }
-    
-    return rates_total;
+    return reason_string;
 }
 
 //+------------------------------------------------------------------+
 //| Función para actualizar el texto en el gráfico                   |
 //+------------------------------------------------------------------+
 void UpdateChartText() {
-   // Si no hay valores válidos, no hacer nada
-   if (lastValidVol5Min == 0 && lastValidVol30Min == 0) {
-       return;
-   }
-   
-   // Verificar que los buffers están inicializados correctamente
-   if(!CheckBuffers())
-   {
-      Print("Error: Buffers no inicializados correctamente");
-      return;
-   }
-   
-   // Configurar nombres y distancias de las etiquetas
-   string labelNames[] = {"VolumenRefText", "MitadVolumenRefText", "VolumenRef30MinText", "MitadVolumenRef30MinText"};
-   string labelPrefixes[] = {
-      "Volumen de referencia 5 minutos: ",
-      "Mitad Volumen de referencia 5 minutos: ",
-      "Volumen de referencia 30 minutos: ",
-      "Mitad Volumen de referencia 30 minutos: "
-   };
-   int yDistances[] = {50, 40, 30, 20};
-   
-    // Variable para almacenar los valores
-    double currentValues[4];
+    static datetime ultimaAdvertencia = 0;
+    datetime tiempoActual = TimeCurrent();
+    
+    // Si no hay valores válidos, solo mostrar advertencia una vez cada 5 minutos
+    if (lastValidVol5Min <= 0 && lastValidVol30Min <= 0) {
+        if (tiempoActual - ultimaAdvertencia > 300) {
+            Print("Advertencia: No hay valores válidos para mostrar");
+            ultimaAdvertencia = tiempoActual;
+        }
+        return;
+    }
 
-    // Siempre intentar obtener valores para todos los períodos
+    // Verificar que los valores no sean extremadamente grandes
+    if (lastValidVol5Min > MAX_SAFE_VOLUME || lastValidVol30Min > MAX_SAFE_VOLUME) {
+        if (tiempoActual - ultimaAdvertencia > 300) {
+            Print("Advertencia: Valores de volumen fuera de rango");
+            ultimaAdvertencia = tiempoActual;
+        }
+        return;
+    }
+
+    // Verificar que los buffers estén inicializados correctamente
+    if (!CheckBuffers()) {
+        if (tiempoActual - ultimaAdvertencia > 300) {
+            Print("Error: Búferes no inicializados correctamente");
+            ultimaAdvertencia = tiempoActual;
+        }
+        return;
+    }
+
+    // Configurar nombres y distancias de las etiquetas
+    string labelNames[] = {"VolumenRefText", "MitadVolumenRefText", "VolumenRef30MinText", "MitadVolumenRef30MinText"};
+    string labelPrefixes[] = {
+        "Volumen de referencia 5 minutos: ",
+        "Mitad Volumen de referencia 5 minutos: ",
+        "Volumen de referencia 30 minutos: ",
+        "Mitad Volumen de referencia 30 minutos: "
+    };
+    int yDistances[] = {50, 40, 30, 20};
+
+    // Crear array de valores y asignarlos después de la declaración
+    double currentValues[4];
     currentValues[0] = lastValidVol5Min;
     currentValues[1] = lastValidHalfVol5Min;
     currentValues[2] = lastValidVol30Min;
     currentValues[3] = lastValidHalfVol30Min;
 
-    // Actualizar cada etiqueta
-    for(int i = 0; i < ArraySize(labelNames); i++) {
-        UpdateLabel(labelNames[i], labelPrefixes[i], yDistances[i], currentValues[i]);
+    // Actualizar cada etiqueta con su valor correspondiente
+    for (int i = 0; i < ArraySize(labelNames); i++) {
+        if (currentValues[i] > 0) {  // Solo mostrar si el valor es válido
+            UpdateLabel(labelNames[i], labelPrefixes[i], yDistances[i], currentValues[i]);
+        }
     }
 }
 
@@ -606,24 +825,24 @@ void UpdateChartText() {
 // Gestiona la creación de líneas horizontales en la ventana de volumen |
 //+---------------------------------------------------------------------+
 void updateChartElements(double vol5Min, double vol30Min) {
-    // Eliminar objetos de volumen previos
-    ObjectsDeleteAll(0, "VolRef");
-    
+    // Actualizar solo si los valores son válidos
+    if(vol5Min <= 0 || vol30Min <= 0) return;
+
     // Buscar ventana de volumen
     int volumeWindow = ChartWindowFind(0, "Volumes");
-    if (volumeWindow == -1) return;
-    
-    // Crear líneas según el período actual
-    if (Period() == PERIOD_M5) {
+    if(volumeWindow == -1) volumeWindow = 0;  // Si no encuentra la ventana de volumen, usar la principal
+
+    // Actualizar líneas
+    if(Period() == PERIOD_M5 || Period() == PERIOD_M1) {
         createVolumeLine("Vol5Min", vol5Min, volumeWindow);
         createVolumeLine("HalfVol5Min", vol5Min / 2.0, volumeWindow);
     }
-    
-    if (Period() == PERIOD_M30) {
+
+    if(Period() == PERIOD_M30 || Period() == PERIOD_H1) {
         createVolumeLine("Vol30Min", vol30Min, volumeWindow);
         createVolumeLine("HalfVol30Min", vol30Min / 2.0, volumeWindow);
     }
-    
+
     ChartRedraw();
 }
 
@@ -633,7 +852,7 @@ void updateChartElements(double vol5Min, double vol30Min) {
 //+------------------------------------------------------------------+
 void createVolumeLine(string name, double value, int window) {
     string objName = "VolRef_" + name;
-    
+
     // Crear línea horizontal con propiedades configurables
     if (ObjectCreate(0, objName, OBJ_HLINE, window, 0, value)) {
         ObjectSetInteger(0, objName, OBJPROP_COLOR, LineColor);
@@ -647,34 +866,39 @@ void createVolumeLine(string name, double value, int window) {
 //+------------------------------------------------------------------+
 //| Función para comprobar si los buffers están inicializados        |
 //+------------------------------------------------------------------+
-bool CheckBuffers()
-{
-   if(ArraySize(volRef5MinBuffer) == 0 || ArraySize(volHalfRef5MinBuffer) == 0 || 
-      ArraySize(volRef30MinBuffer) == 0 || ArraySize(volHalfRef30MinBuffer) == 0)
-   {
-      return false;
-   }
-   return true;
+bool CheckBuffers() {
+    if (ArraySize(volRef5MinBuffer) == 0 || ArraySize(volHalfRef5MinBuffer) == 0 ||
+        ArraySize(volRef30MinBuffer) == 0 || ArraySize(volHalfRef30MinBuffer) == 0) {
+        return false;
+    }
+    return true;
 }
 
 //+------------------------------------------------------------------+
 //| Función para crear o actualizar etiqueta                         |
 //+------------------------------------------------------------------+
 void UpdateLabel(string name, string prefix, int yDistance, double value) {
-    // Crear la etiqueta si no existe
     if(ObjectFind(0, name) == -1) {
-        if(!CreateLabel(name, yDistance)) {
-            Print("Error al crear la etiqueta: ", name);
+        if(!ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0)) {
+            Print("Error al crear etiqueta ", name, ": ", GetLastError());
             return;
         }
+        
+        // Configuración inicial de la etiqueta
+        ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+        ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 10);
+        ObjectSetInteger(0, name, OBJPROP_YDISTANCE, yDistance);
+        ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 7);
+        ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
+        ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
     }
-
-    // Formatear el texto con conversión directa a entero
-    string displayText = prefix + IntegerToString(int(value));
+    
+    // Formatear el valor con dos decimales
+    string formattedValue = DoubleToString(value, 2);
+    string displayText = prefix + formattedValue;
     
     if(!ObjectSetString(0, name, OBJPROP_TEXT, displayText)) {
-        Print("Error al actualizar el texto de la etiqueta: ", name);
-        return;
+        Print("Error al actualizar texto de etiqueta ", name, ": ", GetLastError());
     }
 }
 
@@ -682,21 +906,20 @@ void UpdateLabel(string name, string prefix, int yDistance, double value) {
 //| Función para crear etiquetas con propiedades estándar            |
 //+------------------------------------------------------------------+
 bool CreateLabel(string name, int yDistance) {
-    if(!ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0)) {
+    if (!ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0)) {
         Print("Error al crear objeto etiqueta: ", name);
         return false;
     }
 
     // Configurar propiedades estándar
-    if(!ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_LOWER) || 
-       !ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 10) || 
-       !ObjectSetInteger(0, name, OBJPROP_YDISTANCE, yDistance) || 
-       !ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 7) ||
-       !ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite) || 
-       !ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false))
-       {
-       Print("Error al configurar propiedades de la etiqueta: ", name);
-       return false;
+    if (!ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_LOWER) ||
+        !ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 10) ||
+        !ObjectSetInteger(0, name, OBJPROP_YDISTANCE, yDistance) ||
+        !ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 7) ||
+        !ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite) ||
+        !ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false)) {
+        Print("Error al configurar propiedades de la etiqueta: ", name);
+        return false;
     }
     return true;
 }
